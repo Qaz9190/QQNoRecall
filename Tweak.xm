@@ -45,6 +45,12 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 
+// 前向声明：编译期让编译器认识 OCMsgRecord 的个别方法（运行期由 QQ 提供实现）
+@class OCMsgRecord;
+@interface OCMsgRecord (QQNoRecallExt)
+- (void)setRecallTime:(long long)arg1;
+@end
+
 #define PREF_DOMAIN CFSTR("com.qaz9190.qqnorecall")
 #define PREFS_CHANGED_NOTIFICATION CFSTR("com.qaz9190.qqnorecall/prefsChanged")
 
@@ -208,7 +214,7 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     if (gEnableMessageRecall) {
         Class rec = objc_getClass("OCMsgRecord");
         if (rec && [arg1 isKindOfClass:rec]) {
-            @try { [arg1 setRecallTime:0]; } @catch (...) {}
+            @try { [(OCMsgRecord *)arg1 setRecallTime:0]; } @catch (...) {}
             showBlockToast(@"已拦截一次消息撤回");
             return arg1; // 直接返回原消息，原内容保留在聊天里
         }
