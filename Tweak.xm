@@ -813,7 +813,7 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     if (gEnableMessageRecall) return nil;
     return %orig;
 }
-@end
+%end
 
 %hook QQMessageRecallPackageHandler
 + (BOOL)parseC2CRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3 model:(id)arg4 {
@@ -824,14 +824,14 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     if (gEnableMessageRecall) return;
     %orig;
 }
-@end
+%end
 
 %hook QQMessageRecallNetEngine
 - (BOOL)parseC2CRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3 model:(id)arg4 {
     if (gEnableMessageRecall) return NO;
     return %orig;
 }
-@end
+%end
 
 // 元素缓存：捕获最近消息的元素供备份用（限 500 条）
 %hook OCMsgRecord
