@@ -69,7 +69,8 @@ static void loadPrefs(void) {
     CFPreferencesAppSynchronize(PREF_DOMAIN);
 }
 
-// 用 UIWindowScene.windows 取可见窗口（不用废弃的 UIApplication.keyWindow）
+// 用 UIWindowScene.windows 取可见窗口（未使用，已注释保留备用）
+#if 0
 static UIWindow *qqnorecall_visibleWindow(void) {
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -79,8 +80,7 @@ static UIWindow *qqnorecall_visibleWindow(void) {
     }
     return nil;
 }
-
-static void showBlockToast(NSString *text) { /* 已移除顶部提示功能 */ }
+#endif
 
 // =====================================================================
 //  QQ 内设置面板（自建 UIViewController + 标准 UITableView，三开关）
