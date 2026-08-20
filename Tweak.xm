@@ -55,12 +55,9 @@ static sqlite3 *gDB = NULL;
 static NSString *gDBPath = nil;
 static NSString *gImageDir = nil;
 
-// 前向声明：OCMsgRecord 是 forward-decl 类型，添加 category 让编译器认识我们用到的 selector
+// 前向声明：OCMsgRecord 是 forward-decl 类型；不写 category（会冲突）
+// 调用 peerUid/msgSeq 走 objc_msgSend 避开编译器静态检查
 @class OCMsgRecord;
-@interface OCMsgRecord (QQNoRecallExt)
-- (NSString *)peerUid;
-- (long long)msgSeq;
-@end
 
 // ---- 闪图销毁通知 hook 存根 ----
 static void (*origFlashPicNotificationAction)(id, SEL, id) = NULL;
@@ -738,11 +735,12 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     if (!arg1) return;
     NSString *peerUid = nil;
     long long msgSeq = 0;
-    // OCMsgRecord 是 forward-decl 类型；用 id 转换让编译器不做静态方法检查
+    // OCMsgRecord 是 forward-decl 类型；用 objc_msgSend 直接调用避开静态检查
     @try {
-        peerUid = [(id)self peerUid];
-        id seqVal = [(id)self msgSeq];
-        if ([seqVal isKindOfClass:[NSNumber class]]) msgSeq = [seqVal longLongValue];
+        NSString *(*fnStr)(id, SEL) = (NSString *(*)(id, SEL))objc_msgSend;
+        long long (*fnLL)(id, SEL) = (long long (*)(id, SEL))objc_msgSend;
+        peerUid = fnStr(self, @selector(peerUid));
+        msgSeq = fnLL(self, @selector(msgSeq));
     } @catch (id e) { return; }
     if (!peerUid || !msgSeq) return;
     NSString *key = [NSString stringWithFormat:@"%@_%lld", peerUid, msgSeq];
