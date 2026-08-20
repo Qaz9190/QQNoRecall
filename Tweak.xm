@@ -20,8 +20,10 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 
-// Logos 对 hook Swift 桥接类会报 warning 并开启 -Werror，这里忽略该警告
-#pragma clang diagnostic ignored "-Wlogos-swift-bridged"
+// ---- 偏好开关（默认全部开启，提前声明以便下方闪图 hook 存根引用）----
+static BOOL gEnableMessageRecall = YES; // 消息防撤回
+static BOOL gEnableFlashPic = YES;      // 闪图防撤回
+static BOOL gShowToast = NO;            // 拦截时顶部提示
 
 // 闪图“销毁”通知的原生实现存根（用 MSHookMessageEx 运行时替换，
 // 以绕过 Logos 对 Swift 桥接类 hook 的告警/不可靠行为）
@@ -33,11 +35,6 @@ static void hookedFlashPicNotificationAction(id self, SEL _cmd, id sender) {
 
 #define PREF_DOMAIN CFSTR("com.qaz9190.qqnorecall")
 #define PREFS_CHANGED_NOTIFICATION CFSTR("com.qaz9190.qqnorecall/prefsChanged")
-
-// ---- 偏好开关（默认全部开启）----
-static BOOL gEnableMessageRecall = YES; // 消息防撤回
-static BOOL gEnableFlashPic = YES;      // 闪图防撤回
-static BOOL gShowToast = NO;            // 拦截时顶部提示
 
 static void loadPrefs() {
     CFPropertyListRef v;
