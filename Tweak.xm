@@ -734,7 +734,8 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     // OCMsgRecord 是 forward-decl 类型；用 id 转换让编译器不做静态方法检查
     @try {
         peerUid = [(id)self peerUid];
-        msgSeq = [(id)self msgSeq];
+        id seqVal = [(id)self msgSeq];
+        if ([seqVal isKindOfClass:[NSNumber class]]) msgSeq = [seqVal longLongValue];
     } @catch (id e) { return; }
     if (!peerUid || !msgSeq) return;
     NSString *key = [NSString stringWithFormat:@"%@_%lld", peerUid, msgSeq];
