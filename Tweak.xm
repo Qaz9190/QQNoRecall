@@ -738,75 +738,112 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     Class settingsCls = objc_getClass("QQNewSettingsViewController");
     if (settingsCls && !class_respondsToSelector(settingsCls, @selector(qqnorecall_openSettings))) {
         class_addMethod(settingsCls, @selector(qqnorecall_openSettings),
-                        (IMP)qqnorecall_openSettingsImp, "v@:");
-    }
+                        (IMP)qqnorecall_openSettingsImp, "v@:")// ★★★★★ 消息防撤回 —— v4.0.0 真正入口 ★★★★★
+// 头文件实测发现：QQ 9.3.35 撤回的真正 OC 侧入口只有两处：
+//   1) NTAIOFloatEarManager -onRecvRecallMsg:    (收撤回通知 → 处理 cell 替换)
+//   2) NTAIOMenuRecallService 三个 class method (recallComplete…、recallGrayTipsMsg…)
+// 这两处都是直接调用的 OC method（不是 KMM/Kotlin 转发的）。
+// 两类都是 Swift 桥接类（类名含点 .），Logos %hook 会因 -Werror 报警告；
+// 用 MSHookMessageEx 运行时替换 IMP。同样的原因，
+// NTAIOMessageCellViewModel -reloadAppearanceWithRecord: 也用 MSHookMessageEx。
+// OCMsgRecord 不是 Swift 类，正常用 %hook。
+//
+// 备份防御：OCMsgRecord -recallTime getter 永远返回 0 → 即使 QQ 走任何路径
+// 试图 setRecallTime > 0，cellVM 读到的也永远是 0，原气泡正常显示、不变灰条。
+
+// --- 运行时构造器：安装 Swift 桥接类的 MSHookMessageEx ---
+// 保存原 IMP 到 objc_setAssociatedObject，方便 fallback 时调原
+static void qqnorecall_mshook_instance(Class cls, SEL sel, IMP replacement) {
+    if (!cls) return;
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    IMP orig = method_getImplementation(m);
+    if (!orig) return;
+    objc_setAssociatedObject((id)cls, sel, (id)orig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    method_setImplementation(m, replacement);
+}
+static void qqnorecall_mshook_class(Class cls, SEL sel, IMP replacement) {
+    if (!cls) return;
+    Method m = class_getClassMethod(cls, sel);
+    if (!m) return;
+    IMP orig = method_getImplementation(m);
+    if (!orig) return;
+    objc_setAssociatedObject((id)cls, sel, (id)orig, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    method_setImplementation(m, replacement);
+}
+static IMP qqnorecall_orig_for(Class cls, SEL sel) {
+    if (!cls) return NULL;
+    return (IMP)objc_getAssociatedObject((id)cls, sel);
 }
 
-// ★★★★★ 消息防撤回 —— v4.0.0 真正入口 ★★★★★
-// 头文件实测发现：QQ 9.3.35 撤回的真正 OC 侧入口只有两处：
-//   1) NTAIOFloatEarManager -onRecvRecallMsg:  (收撤回通知 → 处理 cell 替换)
-//   2) NTAIOMenuRecallService 三个 class method (recallComplete / recallGrayTipsMsg)
-// 这两处都是直接调用的 OC method（不是 KMM/Kotlin 转发的），
-// hook 它们并直接 return 即可吞掉整条 OC 侧撤回处理链路。
-// 之前的 KTIKernelMsgListener.onMsgRecall/onMsgDelete/onMsgInfoListUpdate
-// 经实测（顶部无提示、用户报告未生效）确认从未触发——该回调路径在本版不再生效。
-%hook NTAIOChat.NTAIOFloatEarManager
-- (void)onRecvRecallMsg:(id)arg1 {
-    if (!gEnableMessageRecall) { %orig; return; }
-    if (!isPeerEnabledForRecall(arg1)) { %orig; return; }
+// hook 函数们
+static void qqnorecall_onRecvRecallMsg(id self, SEL _cmd, id arg1) {
+    if (!gEnableMessageRecall) {
+        IMP orig = qqnorecall_orig_for(objc_getClass("NTAIOChatNTAIOFloatEarManager"), @selector(onRecvRecallMsg:));
+        if (orig) ((void (*)(id, SEL, id))orig)(self, _cmd, arg1);
+        return;
+    }
     if (arg1) {
         NSString *peer = qqnorecall_extractPeerFromRecallModel(arg1);
         BOOL hadContent = qqnorecall_backupFromRecallModel(arg1);
         addEnabledPeer(peer);
         NSLog(@"[QQNoRecall] blocked onRecvRecallMsg peer=%@ hadContent=%d", peer, hadContent);
+        return; // 吞掉整个 OC 侧撤回处理
     }
-    return; // 不调 %orig → 原消息保留、灰条不生成
 }
-%end
-
-%hook NTAIOChat.NTAIOMenuRecallService
-+ (void)recallCompleteWithCell:(id)arg1 observer:(id)arg2 code:(int)arg3 msg:(id)arg4 {
+static void qqnorecall_recallCompleteWithCell(id self, SEL _cmd, id cell, id observer, int code, id msg) {
     if (gEnableMessageRecall) return;
-    %orig;
+    IMP orig = qqnorecall_orig_for(object_getClass(self), @selector(recallCompleteWithCell:observer:code:msg:));
+    if (orig) ((void (*)(id, SEL, id, id, int, id))orig)(self, _cmd, cell, observer, code, msg);
 }
-+ (void)recallCompleteWithCellViewModel:(id)arg1 observer:(id)arg2 code:(int)arg3 msg:(id)arg4 {
+static void qqnorecall_recallCompleteWithCellViewModel(id self, SEL _cmd, id vm, id observer, int code, id msg) {
     if (gEnableMessageRecall) return;
-    %orig;
+    IMP orig = qqnorecall_orig_for(object_getClass(self), @selector(recallCompleteWithCellViewModel:observer:code:msg:));
+    if (orig) ((void (*)(id, SEL, id, id, int, id))orig)(self, _cmd, vm, observer, code, msg);
 }
-+ (void)recallGrayTipsMsgWithCellView:(id)arg1 observer:(id)arg2 {
+static void qqnorecall_recallGrayTipsMsgWithCellView(id self, SEL _cmd, id view, id observer) {
     if (gEnableMessageRecall) return;
-    %orig;
+    IMP orig = qqnorecall_orig_for(object_getClass(self), @selector(recallGrayTipsMsgWithCellView:observer:));
+    if (orig) ((void (*)(id, SEL, id, id))orig)(self, _cmd, view, observer);
 }
-%end
-
-// 纵深防御 ①：写入 recallTime 时强制改为 0
-%hook OCMsgRecord
-- (void)setRecallTime:(long long)arg1 {
-    if (gEnableMessageRecall) { %orig(0); return; }
-    %orig;
-}
-- (void)setKt_recallTimeFromCodec:(id)arg1 {
-    if (gEnableMessageRecall) { %orig((id)@(0)); return; }
-    %orig;
-}
-%end
-
-// 纵深防御 ②：cell VM 重渲染时清除 recallTime
-%hook NTAIOChat.NTAIOMessageCellViewModel
-- (void)reloadAppearanceWithRecord:(id)record {
+static void qqnorecall_reloadAppearanceWithRecord(id self, SEL _cmd, id record) {
     if (gEnableMessageRecall && record) {
-        NSNumber *(*getter)(id, SEL) = (NSNumber *(*)(id, SEL))objc_msgSend;
-        NSNumber *rt = getter(record, @selector(recallTime));
-        if (rt && [rt longLongValue] > 0) {
-            void (*setter)(id, SEL, long long) = (void (*)(id, SEL, long long))objc_msgSend;
-            setter(record, @selector(setRecallTime:), 0);
-        }
+        // 直接调 record.setRecallTime:0
+        void (*setter)(id, SEL, long long) = (void (*)(id, SEL, long long))objc_msgSend;
+        setter(record, @selector(setRecallTime:), 0);
     }
-    %orig;
+    IMP orig = qqnorecall_orig_for(objc_getClass("NTAIOChatNTAIOMessageCellViewModel"), @selector(reloadAppearanceWithRecord:));
+    if (orig) ((void (*)(id, SEL, id))orig)(self, _cmd, record);
+}
+
+__attribute__((constructor)) static void qqnorecall_install_swifthooks(void) {
+    // 1) NTAIOFloatEarManager -onRecvRecallMsg:
+    qqnorecall_mshook_instance(objc_getClass("NTAIOChatNTAIOFloatEarManager"),
+                              @selector(onRecvRecallMsg:),
+                              (IMP)qqnorecall_onRecvRecallMsg);
+    // 2) NTAIOMenuRecallService 三个 class methods
+    Class menuSvc = objc_getClass("NTAIOChatNTAIOMenuRecallService");
+    qqnorecall_mshook_class(menuSvc, @selector(recallCompleteWithCell:observer:code:msg:),
+                            (IMP)qqnorecall_recallCompleteWithCell);
+    qqnorecall_mshook_class(menuSvc, @selector(recallCompleteWithCellViewModel:observer:code:msg:),
+                            (IMP)qqnorecall_recallCompleteWithCellViewModel);
+    qqnorecall_mshook_class(menuSvc, @selector(recallGrayTipsMsgWithCellView:observer:),
+                            (IMP)qqnorecall_recallGrayTipsMsgWithCellView);
+    // 3) NTAIOMessageCellViewModel -reloadAppearanceWithRecord:
+    qqnorecall_mshook_instance(objc_getClass("NTAIOChatNTAIOMessageCellViewModel"),
+                              @selector(reloadAppearanceWithRecord:),
+                              (IMP)qqnorecall_reloadAppearanceWithRecord);
+}
+
+// 备份防御：OCMsgRecord -recallTime getter 永远返回 0 -> cellVM 看到的就是未撤回
+%hook OCMsgRecord
+- (long long)recallTime {
+    if (gEnableMessageRecall) return 0;
+    return %orig;
 }
 %end
 
-// 纵深防御 ③：旧协议 / 关联账号链路（如果 QQ 走了这条路）
+// 纵深防御（旧协议 / 关联账号链路）
 %hook QQMessageRecallModule
 - (id)handleSideAccountRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3
                             bindUin:(unsigned long long)arg4 tracelessFlag:(id)arg5 {
