@@ -16,6 +16,7 @@
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
 
 #define PREF_DOMAIN CFSTR("com.qaz9190.qqnorecall")

@@ -12,12 +12,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build .deb (rootless, Dopamine/palera1n)
+      # theos-action 仅安装 Theos + iOS SDK 并导出 $THEOS，不会自动编译
+      - name: Install Theos
         uses: Randomblock1/theos-action@v1
-        with:
-          make-args: package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
-      - name: Upload .deb artifact
+      - name: Build .deb (rootless, Dopamine/palera1n)
+        run: |
+          set -o pipefail
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee build.log
+
+      # 失败也能拿到日志（fine-grained PAT 无法读取 gh run view --log）
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload .deb
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: qqnorecall-deb
