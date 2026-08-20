@@ -19,7 +19,11 @@ jobs:
       - name: Build .deb (rootless, Dopamine/palera1n)
         run: |
           set -o pipefail
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee build.log
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless > build.log 2>&1 || {
+            echo "===== BUILD FAILED — build.log ====="
+            cat build.log
+            exit 1
+          }
 
       # 失败也能拿到日志（fine-grained PAT 无法读取 gh run view --log）
       - name: Upload build log
