@@ -4,23 +4,23 @@
 //
 //  Hook 依据（QQ 9.3.35 版本头文件 class-dump）：
 //
-//  ★ 撤回生效的真正开关：消息模型 OCMsgRecord 的 recallTime 字段(long long)
-//    —— 对方撤回时，内核把该消息的 recallTime 设为非 0，AIO 列表读到
-//       recallTime>0 就把“原消息”替换成灰色提示。所以防撤回的核心是
-//       **阻止 recallTime 被写成非 0**（无论经哪个代码路径触发），原消息
-//       因此始终保持 recallTime==0，正常显示、不生成灰条。
-//    → 拦截两个写入点：
-//        -[OCMsgRecord setRecallTime:]                  (long long)
-//        -[OCMsgRecord setKt_recallTimeFromCodec:]      (id，codec 解码写入)
+//  ★ 撤回真正生效的位置（QQ 9.3.35 实测结论）：
+//    OCMsgRecord 的 recallTime 字段在本版【不被任何显示层读取】——头文件里
+//    除 OCMsgRecord 自身外，没有任何类引用 recallTime。实际流程是
+//    QQMessageRecallModule 用
+//      -[QQMessageRecallModule convertRecallItemToMsg:recallModel:msgType:bindUin:]
+//    把“被撤回的原消息(arg1，通常是 OCMsgRecord)”转换成一条独立的“撤回灰条”
+//    消息(NTAIORevokeGrayTipsModel + revokeElement)，再用它替换聊天里的原消息。
+//    → 防撤回核心：在该转换出口直接返回原消息(arg1)，原内容就继续留在聊天界面。
+//    （v2.2.0 误以为 recallTime 是显示开关而去拦截它，对 9.3.35 完全无效。）
 //
-//  ★ 撤回事件入口（NT kernel 主链路）：
+//  ★ 撤回事件入口（NT kernel 主链路，纵深防御）：
 //    -[KTIKernelMsgListener onMsgRecall:(int)peerUid:(id)seq:(unsigned long long)]
 //    ⚠️ 头文件签名首参为 int（KMM 桥接：Kotlin Int → OC int，32bit），
 //       之前误写成 long long 导致类型编码不匹配、hook 挂不上（防撤回失效根因之一）。
-//       拦截后 Kotlin 侧不再触发灰条横幅。
 //
-//  ★ 旧协议 / 关联账号链路（纵深防御）：QQMessageRecallModule /
-//    QQMessageRecallPackageHandler / QQMessageRecallNetEngine。
+//  ★ 旧协议 / 关联账号链路（纵深防御）：QQMessageRecallModule(handleSideAccount…) /
+//    QQMessageRecallPackageHandler / QQMessageRecallNetEngine(parseC2CRecallNotify)。
 //
 //  ★ 闪图销毁：NTAIOChat.NTAIOChatFlashPicContentView -notificationActionWithSender:
 //    Swift 桥接类（类名含点），用 MSHookMessageEx 运行时替换。
@@ -198,41 +198,23 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
 }
 
 // =====================================================================
-//  消息防撤回 —— 核心：阻止 OCMsgRecord.recallTime 被写为非 0
-//  （只要 recallTime 保持 0，原消息永远正常显示、不生成灰条）
+//  消息防撤回 —— 核心：convertRecallItemToMsg 直接返回原消息
+//  QQ 9.3.35 撤回是“用一条撤回灰条替换原消息”，显示层不读 recallTime。
+//  所以拦在转换出口：arg1 通常就是被撤回的原消息(OCMsgRecord)，直接返回它，
+//  原内容就继续留在聊天界面；撤回灰条不再生成。
 // =====================================================================
-%hook OCMsgRecord
-- (void)setRecallTime:(long long)arg1 {
-    if (gEnableMessageRecall && arg1 > 0) {
-        showBlockToast(@"已拦截一次消息撤回");
-        return; // 丢弃撤回标记，消息保持原样
-    }
-    %orig;
-}
-- (void)setKt_recallTimeFromCodec:(id)arg1 {
-    if (gEnableMessageRecall && [arg1 longLongValue] > 0) {
-        showBlockToast(@"已拦截一次消息撤回");
-        return; // codec 解码写入路径同样拦截
-    }
-    %orig;
-}
-%end
-
-// =====================================================================
-//  消息防撤回 —— 撤回事件入口（NT kernel 主链路，首参 int 匹配头文件）
-//  拦截后 Kotlin 侧不再弹出“X 撤回了一条消息”横幅。
-// =====================================================================
-%hook KTIKernelMsgListener
-- (void)onMsgRecall:(int)arg1 peerUid:(id)arg2 seq:(unsigned long long)arg3 {
-    if (gEnableMessageRecall) {
-        return; // 不调用 %orig -> Kotlin 侧撤回逻辑被跳过
-    }
-    %orig;
-}
-%end
-
-// 旧协议 / 关联账号链路（纵深防御）
 %hook QQMessageRecallModule
+- (id)convertRecallItemToMsg:(id)arg1 recallModel:(id)arg2 msgType:(int)arg3 bindUin:(unsigned long long)arg4 {
+    if (gEnableMessageRecall) {
+        Class rec = objc_getClass("OCMsgRecord");
+        if (rec && [arg1 isKindOfClass:rec]) {
+            @try { [arg1 setRecallTime:0]; } @catch (...) {}
+            showBlockToast(@"已拦截一次消息撤回");
+            return arg1; // 直接返回原消息，原内容保留在聊天里
+        }
+    }
+    return %orig;
+}
 - (id)handleSideAccountRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3
                             bindUin:(unsigned long long)arg4 tracelessFlag:(id)arg5 {
     if (gEnableMessageRecall) return nil;
@@ -240,6 +222,27 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
 }
 %end
 
+// 备份防御：即使上面的转换出口未命中，也尽量保住原消息（部分路径会写 recallTime）
+%hook OCMsgRecord
+- (void)setRecallTime:(long long)arg1 {
+    if (gEnableMessageRecall && arg1 > 0) return; // 丢弃撤回标记
+    %orig;
+}
+- (void)setKt_recallTimeFromCodec:(id)arg1 {
+    if (gEnableMessageRecall && [arg1 longLongValue] > 0) return;
+    %orig;
+}
+%end
+
+// 撤回事件入口（NT kernel 主链路，首参 int 匹配头文件）——纵深防御
+%hook KTIKernelMsgListener
+- (void)onMsgRecall:(int)arg1 peerUid:(id)arg2 seq:(unsigned long long)arg3 {
+    if (gEnableMessageRecall) return; // 不调用 %orig -> Kotlin 侧撤回横幅被跳过
+    %orig;
+}
+%end
+
+// C2C 撤回通知解析（旧协议 / 关联账号链路）——纵深防御
 %hook QQMessageRecallPackageHandler
 + (BOOL)parseC2CRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3 model:(id)arg4 {
     if (gEnableMessageRecall) return NO;
