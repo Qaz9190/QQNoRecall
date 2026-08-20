@@ -1,6 +1,6 @@
 Package: com.qaz9190.qqnorecall
 Name: QQNoRecall
-Version: 2.6.0
+Version: 3.0.0
 Architecture: iphoneos-arm64
 Description: QQ 消息防撤回 / 闪图防撤回 (Theos tweak, QQ 9.3.35 NT)
 Maintainer: Qaz9190

@@ -9,6 +9,7 @@ TWEAK_NAME = QQNoRecall
 QQNoRecall_FILES = Tweak.xm
 QQNoRecall_CFLAGS = -fobjc-arc
 QQNoRecall_FRAMEWORKS = UIKit Foundation
+QQNoRecall_LDFLAGS = -lsqlite3
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
