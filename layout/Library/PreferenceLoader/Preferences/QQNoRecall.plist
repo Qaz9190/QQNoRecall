@@ -40,20 +40,6 @@
 			<key>PostNotification</key>
 			<string>com.qaz9190.qqnorecall/prefsChanged</string>
 		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>label</key>
-			<string>拦截时顶部提示</string>
-			<key>defaults</key>
-			<string>com.qaz9190.qqnorecall</string>
-			<key>key</key>
-			<string>kShowToast</string>
-			<key>default</key>
-			<false/>
-			<key>PostNotification</key>
-			<string>com.qaz9190.qqnorecall/prefsChanged</string>
-		</dict>
-	</array>
+		</array>
 </dict>
 </plist>

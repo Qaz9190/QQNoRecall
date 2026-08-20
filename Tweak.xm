@@ -48,10 +48,9 @@
 #define PREF_DOMAIN CFSTR("com.qaz9190.qqnorecall")
 #define PREFS_CHANGED_NOTIFICATION CFSTR("com.qaz9190.qqnorecall/prefsChanged")
 
-// ---- 偏好开关（默认全部开启；kShowToast 默认开便于验证 hook 是否命中）----
+// ---- 偏好开关（默认全部开启）----
 static BOOL gEnableMessageRecall = YES; // 消息防撤回
 static BOOL gEnableFlashPic = YES;      // 闪图防撤回
-static BOOL gShowToast = YES;           // 拦截时顶部提示
 
 // ---- 闪图销毁通知 hook 存根（由文件底部 constructor 用 MSHookMessageEx 安装）----
 static void (*origFlashPicNotificationAction)(id, SEL, id) = NULL;
@@ -67,8 +66,6 @@ static void loadPrefs(void) {
     if (v) { gEnableMessageRecall = [(__bridge id)v boolValue]; CFRelease(v); }
     v = CFPreferencesCopyAppValue(CFSTR("kEnableFlashPic"), PREF_DOMAIN);
     if (v) { gEnableFlashPic = [(__bridge id)v boolValue]; CFRelease(v); }
-    v = CFPreferencesCopyAppValue(CFSTR("kShowToast"), PREF_DOMAIN);
-    if (v) { gShowToast = [(__bridge id)v boolValue]; CFRelease(v); }
     CFPreferencesAppSynchronize(PREF_DOMAIN);
 }
 
@@ -83,30 +80,7 @@ static UIWindow *qqnorecall_visibleWindow(void) {
     return nil;
 }
 
-static void showBlockToast(NSString *text) {
-    if (!gShowToast || text.length == 0) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = qqnorecall_visibleWindow();
-        if (!win) return;
-        UILabel *lbl = [[UILabel alloc] init];
-        lbl.text = text;
-        lbl.textColor = [UIColor whiteColor];
-        lbl.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.82];
-        lbl.font = [UIFont systemFontOfSize:13];
-        lbl.textAlignment = NSTextAlignmentCenter;
-        lbl.layer.cornerRadius = 8;
-        lbl.layer.masksToBounds = YES;
-        lbl.alpha = 0.0;
-        CGSize sz = [lbl sizeThatFits:CGSizeMake(300, 30)];
-        CGFloat w = MIN(sz.width + 28, 300);
-        CGFloat top = win.safeAreaInsets.top > 0 ? win.safeAreaInsets.top : 20;
-        lbl.frame = CGRectMake((win.bounds.size.width - w) / 2.0, top + 56, w, 32);
-        [win addSubview:lbl];
-        [UIView animateWithDuration:0.25 animations:^{ lbl.alpha = 1.0; }];
-        [UIView animateWithDuration:0.35 delay:1.3 options:0 animations:^{ lbl.alpha = 0.0; }
-                         completion:^(BOOL f){ [lbl removeFromSuperview]; }];
-    });
-}
+static void showBlockToast(NSString *text) { /* 已移除顶部提示功能 */ }
 
 // =====================================================================
 //  QQ 内设置面板（自建 UIViewController + 标准 UITableView，三开关）
@@ -115,8 +89,8 @@ static void showBlockToast(NSString *text) {
 @property (nonatomic, strong) UITableView *tv;
 @end
 
-static NSString *const kQQNoRecallKeys[] = {@"kEnableMessageRecall", @"kEnableFlashPic", @"kShowToast"};
-static NSString *const kQQNoRecallTitles[] = {@"消息防撤回", @"闪图防撤回", @"拦截时顶部提示"};
+static NSString *const kQQNoRecallKeys[] = {@"kEnableMessageRecall", @"kEnableFlashPic"};
+static NSString *const kQQNoRecallTitles[] = {@"消息防撤回", @"闪图防撤回"};
 
 @implementation QQNoRecallPrefsVC
 - (void)viewDidLoad {
@@ -146,7 +120,7 @@ static NSString *const kQQNoRecallTitles[] = {@"消息防撤回", @"闪图防撤
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 1; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return 3; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return 2; }
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
     return @"功能开关（改动即时生效，无需重启 QQ）";
 }
@@ -198,41 +172,43 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
 }
 
 // =====================================================================
-//  消息防撤回 —— 核心：拦截 KTIKernelMsgListener.onMsgDelete:msgIds:
-//  QQ 9.3.35 撤回由 Kotlin 内核驱动，OC 侧的 QQMessageRecallModule 根本不
-//  被调用。Kotlin 处理完后通过以下回调通知 OC：
-//    1) onMsgRecall:peerUid:seq:    —— 撤回事件
-//    2) onMsgDelete:msgIds:          —— 删除原消息（← 拦截它，原消息保留）
-//    3) onMsgInfoListAdd:            —— 插入撤回灰条（不拦截，让灰条照常插入）
+//  消息防撤回 —— 核心：拦截 KTIKernelMsgListener 的多个回调保留原消息
+//  QQ 9.3.35 撤回由 Kotlin 内核驱动，OC 侧 QQMessageRecallModule 根本不调。
+//  Kotlin 处理完后通过以下回调通知 OC（撤回窗口内全部跳过）：
+//    1) onMsgRecall:peerUid:seq:    —— 撤回事件（设标志位）
+//    2) onMsgDelete:msgIds:          —— 删除原消息（跳过）
+//    3) onMsgInfoListUpdate:         —— 列表整体刷新（含"删原+加灰"）（跳过，
+//                                     关键：如果原消息是通过此回调从 OC AIO 视图
+//                                     移除的，跳过它就能让原消息保留在视图里）
+//    4) onMsgInfoListAdd:            —— 插入撤回灰条（不拦截，让灰条照常插入）
 //  → 最终效果：原内容留在聊天里 + 下方带一条「撤回了以上消息」灰条。
+//  → 标志位用 dispatch_after 延迟 0.8s 清零，确保多个回调都在窗口内被拦截。
 // =====================================================================
 static BOOL gIsInRecall = NO;
 
 %hook KTIKernelMsgListener
-// 撤回事件：设标志位 + 顶部提示（正常 %orig，让 Kotlin 后续回调照常发生）
 - (void)onMsgRecall:(int)arg1 peerUid:(id)arg2 seq:(unsigned long long)arg3 {
-    gIsInRecall = YES;
     if (gEnableMessageRecall) {
-        showBlockToast(@"已拦截一次消息撤回");
+        gIsInRecall = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ gIsInRecall = NO; });
     }
     %orig;
 }
-// 删除原消息：撤回期间跳过 %orig，原消息留在聊天列表
 - (void)onMsgDelete:(id)arg1 msgIds:(id)arg2 {
     if (gEnableMessageRecall && gIsInRecall) {
-        gIsInRecall = NO;
-        return; // 关键：原消息不删除 → 聊天列表里原内容保留
+        return; // 撤回期间的删除跳过，原消息保留
     }
-    gIsInRecall = NO;
     %orig;
 }
-// 插入撤回灰条：不拦截（让灰条照常显示在原消息下方）
-- (void)onMsgInfoListAdd:(id)arg1 {
-    %orig;
-}
-// 列表更新：不拦截（让 UI 刷新以同时显示原消息和灰条）
 - (void)onMsgInfoListUpdate:(id)arg1 {
+    if (gEnableMessageRecall && gIsInRecall) {
+        return; // 撤回期间的列表更新跳过，原消息保留在 OC AIO 视图里
+    }
     %orig;
+}
+- (void)onMsgInfoListAdd:(id)arg1 {
+    %orig; // 让灰条照常插入
 }
 %end
 
