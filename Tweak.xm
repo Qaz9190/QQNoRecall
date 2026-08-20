@@ -3,11 +3,28 @@
 //
 //  Hook 依据（QQ 9.3.35 头文件 class-dump）：
 //
-//  ★ 撤回主链路（Kotlin 内核层驱动，OC 通过回调接收）：
+//  ★ ★ ★ 撤回真正入口（QQ 9.3.35 实测结论，关键，非直觉）★ ★ ★
+//    OC 侧撤回的真正触发入口是 NTAIOFloatEarManager.onRecvRecallMsg:
+//    接收参数是 NTAIOChat.RecallNotiAIOModel（含 notiMsgs → RecallNotiAIOMsg）。
+//    此方法内部处理：AIO 数据源查找被撤回的 cell → 标记/替换为灰条 cell。
+//    → 拦截此方法、不调 %orig → 整个 OC 侧撤回处理被截、原消息保留在列表里。
+//    (v3.0 之前 hook KTIKernelMsgListener.onMsgDelete/onMsgInfoListUpdate
+//     都没生效——Kotlin 通过此 OBJC 入口直接送达。)
+//
+//    同时 hook 备份入口 NTAIOMenuRecallService 三个 class method
+//    （recallComplete…、recallGrayTipsMsg…），作为纵深防御。
+//
+//    防 recallTime 写入：OCMsgRecord.setRecallTime: / -setKt_recallTimeFromCodec:
+//    以及初始化器 -initWithMsgId:…recallTime:(long long)arg45…
+//    即使未命中上层，确保 cellVM 读到的 recallTime == 0、原气泡显示、不变灰条。
+//
+//  ★ 撤回事件入口（NT kernel Kotlin 主链路，纵深防御）：
 //      -[KTIKernelMsgListener onMsgRecall:(int)peerUid:(id)seq:(unsigned long long)]
-//      -[KTIKernelMsgListener onMsgDelete:(id)msgIds:]
-//      -[KTIKernelMsgListener onMsgInfoListUpdate:]    ← 撤回窗口内跳过（保留原消息）
-//      -[KTIKernelMsgListener onMsgInfoListAdd:]      ← 不拦截（让灰条照常插入）
+//      头文件签名首参为 int（KMM 桥接：Kotlin Int → OC int，32bit）。
+//
+//  ★ 旧协议 / 关联账号链路（纵深防御）：
+//      QQMessageRecallModule(handleSideAccount…)
+//      QQMessageRecallPackageHandler / QQMessageRecallNetEngine(parseC2CRecallNotify)。
 //
 //  ★ 闪图销毁：
 //      NTAIOChat.NTAIOChatFlashPicContentView -notificationActionWithSender:
@@ -43,9 +60,6 @@ static BOOL gSelectiveMode = NO;        // 选择性生效（NO=全部生效，Y
 
 // ---- 选择性生效：已添加的 peerUid 列表（持久化在 kEnabledPeers）----
 static NSMutableSet<NSString *> *gEnabledPeers = nil;
-
-// ---- 撤回窗口标志 ----
-static BOOL gIsInRecall = NO;
 
 // ---- 元素缓存：(peerUid_seq) -> elements NSArray（限 500 条，撤回后清理）----
 static NSMutableDictionary<NSString *, NSArray *> *gElementsCache = nil;
@@ -92,6 +106,46 @@ static BOOL isPeerEnabled(NSString *peerUid) {
     if (!gSelectiveMode) return YES; // 全部生效模式
     if (!peerUid) return NO;
     return [gEnabledPeers containsObject:peerUid];
+}
+
+// 撤回模型 (NTAIOChat.RecallNotiAIOModel 或 RecallNotiAIOModel) 同样判断:
+static BOOL isPeerEnabledForRecall(id recallModel) {
+    NSString *peer = qqnorecall_extractPeerFromRecallModel(recallModel);
+    return isPeerEnabled(peer);
+}
+
+// 从 RecallNotiAIOModel(可能为 NTAIOChat.RecallNotiAIOModel 或 RecallNotiAIOModel) 提取 peer/aioUin
+static NSString *qqnorecall_extractPeerFromRecallModel(id model) {
+    if (!model) return nil;
+    id (*msgSend)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id s = msgSend(model, @selector(aioUin));
+    if ([s isKindOfClass:[NSString class]] && [(NSString *)s length] > 0) return s;
+    s = msgSend(model, @selector(peerUid));
+    if ([s isKindOfClass:[NSString class]] && [(NSString *)s length] > 0) return s;
+    return nil;
+}
+
+// 遍历 model.notiMsgs 的每条 RecallNotiAIOMsg，从元素缓存或自身 msgArr 中尽力找内容并备份
+// 返回是否成功拿到至少一条内容
+static BOOL qqnorecall_backupFromRecallModel(id model) {
+    id (*msgSend)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id notiMsgs = msgSend(model, @selector(notiMsgs));
+    if (![notiMsgs respondsToSelector:@selector(count)]) return NO;
+    NSUInteger n = [notiMsgs count];
+    BOOL got = NO;
+    for (NSUInteger i = 0; i < n; i++) {
+        id notiMsg = [notiMsgs objectAtIndex:i];
+        id msgArr = msgSend(notiMsg, @selector(msgArr));
+        if (!msgArr) continue;
+        // 简单：把整个 msgArr 当 elements 保存（兼容旧路径）
+        if (gElementsCache && msgArr) {
+            id peerUid = msgSend(model, @selector(aioUin));
+            NSString *p = [peerUid isKindOfClass:[NSString class]] ? peerUid : nil;
+            dbSaveRecallEvent(p, nil, 0, 0, nil, 0, msgArr, NO);
+            got = YES;
+        }
+    }
+    return got;
 }
 
 static void addEnabledPeer(NSString *peerUid) {
@@ -688,45 +742,96 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     }
 }
 
-// 消息防撤回
-%hook KTIKernelMsgListener
-- (void)onMsgRecall:(int)arg1 peerUid:(id)arg2 seq:(unsigned long long)arg3 {
-    if (gEnableMessageRecall) {
-        NSString *peer = [arg2 isKindOfClass:[NSString class]] ? arg2 : nil;
-        BOOL protect = isPeerEnabled(peer);
-        if (protect) {
-            gIsInRecall = YES;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ gIsInRecall = NO; });
-            // 自动加入列表（仅选择性模式）
-            if (gSelectiveMode && peer) addEnabledPeer(peer);
-            // 尝试从元素缓存备份
-            NSString *key = [NSString stringWithFormat:@"%@_%llu", peer ?: @"", (unsigned long long)arg3];
-            NSArray *elements = nil;
-            @synchronized (gElementsCache) { elements = gElementsCache[key]; }
-            if (elements) {
-                dbSaveRecallEvent(peer, nil, (long long)arg3, 0, nil, 0, elements, NO);
-                @synchronized (gElementsCache) { [gElementsCache removeObjectForKey:key]; }
-            } else {
-                // 没有缓存内容，至少记录撤回事件
-                dbSaveRecallEvent(peer, nil, (long long)arg3, 0, nil, 0, nil, NO);
-            }
+// ★★★★★ 消息防撤回 —— v4.0.0 真正入口 ★★★★★
+// 头文件实测发现：QQ 9.3.35 撤回的真正 OC 侧入口只有两处：
+//   1) NTAIOFloatEarManager -onRecvRecallMsg:  (收撤回通知 → 处理 cell 替换)
+//   2) NTAIOMenuRecallService 三个 class method (recallComplete / recallGrayTipsMsg)
+// 这两处都是直接调用的 OC method（不是 KMM/Kotlin 转发的），
+// hook 它们并直接 return 即可吞掉整条 OC 侧撤回处理链路。
+// 之前的 KTIKernelMsgListener.onMsgRecall/onMsgDelete/onMsgInfoListUpdate
+// 经实测（顶部无提示、用户报告未生效）确认从未触发——该回调路径在本版不再生效。
+%hook NTAIOChat.NTAIOFloatEarManager
+- (void)onRecvRecallMsg:(id)arg1 {
+    if (!gEnableMessageRecall) { %orig; return; }
+    if (!isPeerEnabledForRecall(arg1)) { %orig; return; }
+    if (arg1) {
+        NSString *peer = qqnorecall_extractPeerFromRecallModel(arg1);
+        BOOL hadContent = qqnorecall_backupFromRecallModel(arg1);
+        addEnabledPeer(peer);
+        NSLog(@"[QQNoRecall] blocked onRecvRecallMsg peer=%@ hadContent=%d", peer, hadContent);
+    }
+    return; // 不调 %orig → 原消息保留、灰条不生成
+}
+%end
+
+%hook NTAIOChat.NTAIOMenuRecallService
++ (void)recallCompleteWithCell:(id)arg1 observer:(id)arg2 code:(int)arg3 msg:(id)arg4 {
+    if (gEnableMessageRecall) return;
+    %orig;
+}
++ (void)recallCompleteWithCellViewModel:(id)arg1 observer:(id)arg2 code:(int)arg3 msg:(id)arg4 {
+    if (gEnableMessageRecall) return;
+    %orig;
+}
++ (void)recallGrayTipsMsgWithCellView:(id)arg1 observer:(id)arg2 {
+    if (gEnableMessageRecall) return;
+    %orig;
+}
+%end
+
+// 纵深防御 ①：写入 recallTime 时强制改为 0
+%hook OCMsgRecord
+- (void)setRecallTime:(long long)arg1 {
+    if (gEnableMessageRecall) { %orig(0); return; }
+    %orig;
+}
+- (void)setKt_recallTimeFromCodec:(id)arg1 {
+    if (gEnableMessageRecall) { %orig((id)@(0)); return; }
+    %orig;
+}
+%end
+
+// 纵深防御 ②：cell VM 重渲染时清除 recallTime
+%hook NTAIOChat.NTAIOMessageCellViewModel
+- (void)reloadAppearanceWithRecord:(id)record {
+    if (gEnableMessageRecall && record) {
+        NSNumber *(*getter)(id, SEL) = (NSNumber *(*)(id, SEL))objc_msgSend;
+        NSNumber *rt = getter(record, @selector(recallTime));
+        if (rt && [rt longLongValue] > 0) {
+            void (*setter)(id, SEL, long long) = (void (*)(id, SEL, long long))objc_msgSend;
+            setter(record, @selector(setRecallTime:), 0);
         }
     }
     %orig;
 }
-- (void)onMsgDelete:(id)arg1 msgIds:(id)arg2 {
-    if (gEnableMessageRecall && gIsInRecall) return;
-    %orig;
-}
-- (void)onMsgInfoListUpdate:(id)arg1 {
-    if (gEnableMessageRecall && gIsInRecall) return;
-    %orig;
-}
-- (void)onMsgInfoListAdd:(id)arg1 {
-    %orig;
-}
 %end
+
+// 纵深防御 ③：旧协议 / 关联账号链路（如果 QQ 走了这条路）
+%hook QQMessageRecallModule
+- (id)handleSideAccountRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3
+                            bindUin:(unsigned long long)arg4 tracelessFlag:(id)arg5 {
+    if (gEnableMessageRecall) return nil;
+    return %orig;
+}
+@end
+
+%hook QQMessageRecallPackageHandler
++ (BOOL)parseC2CRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3 model:(id)arg4 {
+    if (gEnableMessageRecall) return NO;
+    return %orig;
+}
++ (void)parseC2CRecallInOut:(id)arg1 {
+    if (gEnableMessageRecall) return;
+    %orig;
+}
+@end
+
+%hook QQMessageRecallNetEngine
+- (BOOL)parseC2CRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3 model:(id)arg4 {
+    if (gEnableMessageRecall) return NO;
+    return %orig;
+}
+@end
 
 // 元素缓存：捕获最近消息的元素供备份用（限 500 条）
 %hook OCMsgRecord
