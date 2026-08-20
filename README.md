@@ -1,58 +1,63 @@
-# QQNoRecall
+# QQNoRecall — QQ 消息防撤回 / 闪图防撤回
 
-QQ 消息防撤回 / 闪图（阅后即焚）防撤回的 iOS 越狱插件（Theos + Logos）。
+针对 **QQ（com.tencent.mqq）9.3.35（NT 架构 / KMM 桥接）** 的 iOS 越狱插件。
 
-> 仅用于学习与研究，请遵守你所在地区法律法规，仅在本人设备上使用。
+基于 QQ 9.3.35 的头文件 class-dump 定位撤回链路与设置页结构实现，源码见 [`Tweak.xm`](Tweak.xm)。
 
 ## 功能
 
-- **消息防撤回**：拦截 QQ NT kernel 的撤回回调，被撤回的文字 / 图片 / 文件等消息保持原样显示，不出现"撤回"灰条。
-- **闪图防撤回**：拦截闪图被查看后的"销毁"通知，使闪图保留可见；发送者主动撤回闪图同样被拦截。
-- **设置页开关**：iOS「设置」→「QQ 防撤回」，三个开关：消息防撤回 / 闪图防撤回 / 拦截时顶部提示，改动即时生效。
-- 偏好通过 `CFPreferences` 直读，无 Cephei 依赖，兼容 rootless / roothide。
+- **消息防撤回**：拦截 NT kernel 撤回回调，消息保持原样、不出现“撤回”灰条。
+- **闪图防撤回**：拦截闪图“已焚毁”销毁通知，保留原图可见。
+- **QQ 设置页内开关**：在 QQ 自带「设置」页（导航栏右上角「防撤回」按钮）打开设置面板，含三个开关，改动即时生效，无需重启 QQ。
+- **系统设置备选**：同时提供 PreferenceLoader 面板（iOS「设置」→「QQ 防撤回」），与 QQ 内开关共用同一套偏好，二选一即可。
 
-## Hook 依据（QQ 9.3.35 版本头文件）
+## 在 QQ 里打开设置
 
-| 功能 | Hook 类 / 方法 | 方式 |
-| --- | --- | --- |
-| 消息撤回（主链路） | `KTIKernelMsgListener -onMsgRecall:peerUid:seq:` | Logos `%hook` |
-| 消息撤回（旧协议/关联账号纵深防御） | `QQMessageRecallModule -handleSideAccountRecallNotify:bufferLen:subcmd:bindUin:tracelessFlag:`<br>`QQMessageRecallPackageHandler +parseC2CRecallNotify:bufferLen:subcmd:model:`<br>`QQMessageRecallNetEngine -parseC2CRecallNotify:bufferLen:subcmd:model:` | Logos `%hook` |
-| 闪图销毁 | `NTAIOChat.NTAIOChatFlashPicContentView -notificationActionWithSender:` | `MSHookMessageEx`（Swift 桥接类，见下） |
+```
+QQ → 左上角头像 → 设置
+```
+进入「设置」页后，右上角出现 **「防撤回」** 按钮，点击打开设置面板：
 
-**为什么闪图 hook 不用 `%hook`**：该类是 Swift 桥接类（类名含点），Logos 会产生告警且开启 `-Werror` 导致编译失败，同时官方说明"无法捕获全部调用"，因此改用 `MSHookMessageEx` 运行时替换。
+| 开关 | 作用 |
+|---|---|
+| 消息防撤回 | 拦截他人/自己发出的消息撤回 |
+| 闪图防撤回 | 拦截闪图被查看后的自动销毁 |
+| 拦截时顶部提示 | 每次成功拦截时在屏幕顶部弹一条提示（默认开，便于确认插件在生效；确认后可关闭）|
 
-## 编译
+> 偏好存储域：`com.qaz9190.qqnorecall`，key：`kEnableMessageRecall` / `kEnableFlashPic` / `kShowToast`。
 
-### CI（推荐）
+## 验证防撤回是否真的生效（重要）
 
-推送到 `main` 分支或手动触发 Actions 即自动**并行构建 rootless 与 roothide 两种 `.deb`**：
+NT 架构下撤回逻辑由 Kotlin 桥接层驱动，若 hook 命中，对方撤回消息时屏幕顶部会弹出
+**「已拦截一次消息撤回」** 提示（需开启“拦截时顶部提示”）。
 
-- `qqnorecall-deb-rootless`：Dopamine / palera1n（iOS 15+，`/var/jb`，`iphoneos-arm64`）
-- `qqnorecall-deb-roothide`：roothide Bootstrap（A12+，`iphoneos-arm64e`，用 `roothide/theos` fork 构建）
+- **能看到提示** → hook 已命中，撤回已被拦截，功能正常。
+- **看不到提示且撤回仍发生** → 说明 hook 未命中（多为 deb 格式与设备越狱类型不匹配）。
 
-产物在 Actions → Artifacts 下载；构建失败时 `build-log-<scheme>` 产物内含完整日志。
+## 安装（请按你的越狱类型选 deb）
 
-### 本地（macOS / Linux / WSL + Theos）
+仓库 Actions 自动产出两种 `.deb`：
+
+| 越狱类型 | 产物 | 说明 |
+|---|---|---|
+| **rootless**（Dopamine / palera1n，iOS 15+） | `qqnorecall-deb-rootless` | 文件落 `/var/jb`，依赖 `com.opa334.substrate` |
+| **roothide**（A12+ / arm64e） | `qqnorecall-deb-roothide` | 相对 jbroot，依赖 `com.roothide.substrate` |
+
+下载对应 artifact 里的 `.deb`，用已装的包管理器（Sileo / Zebra / Filza）安装，**杀掉 QQ 重进**即可。
+装错格式（如在 roothide 上装 rootless）会导致插件完全不加载——这是“设置里没插件 / 防撤回不生效”最常见的原因。
+
+## 本地构建
 
 ```bash
+# rootless
 make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+# roothide（需 roothide/theos fork）
+make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 ```
-
-产物在 `packages/*.deb`。
-
-## 安装
-
-Sileo / Zebra / Filza 安装 `.deb`，重启 QQ。设置入口：iOS 设置 → QQ 防撤回。
-
-## 已验证的 CI 环境结论（避坑）
-
-1. `Randomblock1/theos-action@v1` **只安装** Theos 与 iOS SDK（当前 `iPhoneOS16.5.sdk`）并导出 `$THEOS`，**不会执行 make**，必须写独立的 `make package` 步骤；其有效输入仅有 `theos-dir / theos-src / theos-sdks / theos-sdks-branch / orion`。
-2. Theos 开启 `-Werror`：deprecated API（如 `UIApplication.keyWindow`，iOS 13 废弃）会直接编译失败，需用 `UIWindowScene.windows` 遍历替代或用 `#pragma clang diagnostic ignored "-Wdeprecated-declarations"` 包住。
-3. Logos 对 Swift 桥接类（类名含点）的 `%hook` 告警同样被当错误处理。
-4. Makefile 中 SDK 版本留空（`TARGET = iphone:clang::15.0`）自动匹配已安装 SDK；写死 `15.0` 会因 SDK 不存在而失败。
-5. 部署目标需 ≥ 15.0（rootless 要求），同时满足 `safeAreaInsets`(iOS 11) / `UIWindowScene`(iOS 13) 的可用性检查。
 
 ## 已知边界
 
-- 闪图防撤回依赖拦截 `-notificationActionWithSender:`；QQ 小版本若调整销毁触发点，可在 `Tweak.xm` 补充 Hook。头文件中的备选类：`AIOPhotoBrowser.NTAIOFlashPicturePhotoBrowserViewController`（`finishFlashImgPreview` / `hideFlashImgPreview`）、`AIOPhotoBrowser.NTAIOFlashPicturePhotoBrowserSecretView`、`QQFlashPicturePlayer`。
-- 防撤回为"本地拦截"，服务器侧仍记录撤回动作，不影响对端。
+- 闪图防撤回仅拦截 `NTAIOChat.NTAIOChatFlashPicContentView -notificationActionWithSender:` 一个销毁触发点；
+  若某 QQ 小版本改了销毁逻辑，可在 `Tweak.xm` 补 `QQFlashPicturePlayer` /
+  `AIOPhotoBrowser.NTAIOFlashPicturePhotoBrowserViewController -finishFlashImgPreview` 等备选类。
+- 仅影响本机显示（本地拦截），对方仍会收到正常撤回。
