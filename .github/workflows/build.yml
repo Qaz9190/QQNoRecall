@@ -7,6 +7,17 @@ on:
 
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # rootless：Dopamine / palera1n（iOS 15+，文件落 /var/jb，Arch iphoneos-arm64）
+          - scheme: rootless
+            theos-src: https://github.com/theos/theos
+          # roothide：roothide Bootstrap（A12+ arm64e），必须用 roothide/theos fork
+          # （上游 theos 无 roothide scheme），Arch iphoneos-arm64e
+          - scheme: roothide
+            theos-src: https://github.com/roothide/theos
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -15,12 +26,14 @@ jobs:
       # theos-action 仅安装 Theos + iOS SDK（当前 iPhoneOS16.5.sdk）并导出 $THEOS，
       # 不会执行 make —— 必须有独立的 make 步骤。有效输入仅：
       # theos-dir / theos-src / theos-sdks / theos-sdks-branch / orion
-      - name: Install Theos
+      - name: Install Theos (${{ matrix.scheme }})
         uses: Randomblock1/theos-action@v1
+        with:
+          theos-src: ${{ matrix.theos-src }}
 
-      - name: Build .deb (rootless, Dopamine/palera1n)
+      - name: Build .deb (${{ matrix.scheme }})
         run: |
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless > build.log 2>&1 || {
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} > build.log 2>&1 || {
             echo "===== BUILD FAILED — build.log ====="
             cat build.log
             exit 1
@@ -31,7 +44,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-${{ matrix.scheme }}
           path: build.log
           if-no-files-found: ignore
 
@@ -39,6 +52,6 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: qqnorecall-deb
+          name: qqnorecall-deb-${{ matrix.scheme }}
           path: packages/*.deb
           if-no-files-found: error

@@ -25,7 +25,12 @@ QQ 消息防撤回 / 闪图（阅后即焚）防撤回的 iOS 越狱插件（The
 
 ### CI（推荐）
 
-推送到 `main` 分支或手动触发 Actions 即自动构建 rootless `.deb`（产物在 Actions → Artifacts → `qqnorecall-deb`）。构建失败时 `build-log` 产物内含完整日志。
+推送到 `main` 分支或手动触发 Actions 即自动**并行构建 rootless 与 roothide 两种 `.deb`**：
+
+- `qqnorecall-deb-rootless`：Dopamine / palera1n（iOS 15+，`/var/jb`，`iphoneos-arm64`）
+- `qqnorecall-deb-roothide`：roothide Bootstrap（A12+，`iphoneos-arm64e`，用 `roothide/theos` fork 构建）
+
+产物在 Actions → Artifacts 下载；构建失败时 `build-log-<scheme>` 产物内含完整日志。
 
 ### 本地（macOS / Linux / WSL + Theos）
 
