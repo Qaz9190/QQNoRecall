@@ -5,19 +5,19 @@
 //  Hook 依据（QQ 9.3.35 版本头文件 class-dump）：
 //
 //  ★ 撤回真正生效的位置（QQ 9.3.35 实测结论）：
-//    OCMsgRecord 的 recallTime 字段在本版【不被任何显示层读取】——头文件里
-//    除 OCMsgRecord 自身外，没有任何类引用 recallTime。实际流程是
-//    QQMessageRecallModule 用
-//      -[QQMessageRecallModule convertRecallItemToMsg:recallModel:msgType:bindUin:]
-//    把“被撤回的原消息(arg1，通常是 OCMsgRecord)”转换成一条独立的“撤回灰条”
-//    消息(NTAIORevokeGrayTipsModel + revokeElement)，再用它替换聊天里的原消息。
-//    → 防撤回核心：在该转换出口直接返回原消息(arg1)，原内容就继续留在聊天界面。
-//    （v2.2.0 误以为 recallTime 是显示开关而去拦截它，对 9.3.35 完全无效。）
+//    OCMsgRecord 的 recallTime 字段在本版【不被任何显示层读取】。QQMessageRecallModule
+//    在收到撤回时，**先调** -[QQMessageRecallModule getLocalMessageByMessage:andMsgId:]
+//    与 -[getRecallMessageContent:bindUin:] **取出原 OCMsgRecord**（用于灰条预览/替换），
+//    **然后调** -[convertRecallItemToMsg:recallModel:msgType:bindUin:]（**arg1 是 recall
+//    item，不是原消息**）造一条独立的“撤回灰条”消息(NTAIORevokeGrayTipsModel + revokeElement)
+//    去替换聊天里的原消息。→ 防撤回核心：先在 getLocalMessageByMessage/getRecallMessageContent
+//    截获原消息缓存起来，然后在 convertRecallItemToMsg **直接返回缓存的原消息**，
+//    原内容就继续留在聊天界面、不生成灰条。
+//    （v2.2.0 误拦 recallTime 失败；v2.3.0 误以为 arg1 就是原消息也失败——arg1 是 recall item。）
 //
 //  ★ 撤回事件入口（NT kernel 主链路，纵深防御）：
 //    -[KTIKernelMsgListener onMsgRecall:(int)peerUid:(id)seq:(unsigned long long)]
-//    ⚠️ 头文件签名首参为 int（KMM 桥接：Kotlin Int → OC int，32bit），
-//       之前误写成 long long 导致类型编码不匹配、hook 挂不上（防撤回失效根因之一）。
+//    ⚠️ 头文件签名首参为 int（KMM 桥接：Kotlin Int → OC int，32bit）。
 //
 //  ★ 旧协议 / 关联账号链路（纵深防御）：QQMessageRecallModule(handleSideAccount…) /
 //    QQMessageRecallPackageHandler / QQMessageRecallNetEngine(parseC2CRecallNotify)。
@@ -198,20 +198,47 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
 }
 
 // =====================================================================
-//  消息防撤回 —— 核心：convertRecallItemToMsg 直接返回原消息
-//  QQ 9.3.35 撤回是“用一条撤回灰条替换原消息”，显示层不读 recallTime。
-//  所以拦在转换出口：arg1 通常就是被撤回的原消息(OCMsgRecord)，直接返回它，
-//  原内容就继续留在聊天界面；撤回灰条不再生成。
+//  消息防撤回 —— 核心：截获 getLocalMessageByMessage / getRecallMessageContent
+//  返回的原 OCMsgRecord，缓存在静态变量里，然后在 convertRecallItemToMsg
+//  直接返回缓存的原消息（arg1 是 recall item 不是原消息，原消息是模块内部
+//  通过 getLocalMessageByMessage:andMsgId: 取出来供造灰条用的）。
+//  → 原内容继续留在聊天界面，撤回灰条不再生成。
 // =====================================================================
+static id gCapturedOriginal = nil;
+
 %hook QQMessageRecallModule
+// 模块取出本地原消息（用于灰条预览/替换）→ 截获并缓存
+- (id)getLocalMessageByMessage:(id)arg1 andMsgId:(int)arg2 {
+    id result = %orig;
+    Class rec = objc_getClass("OCMsgRecord");
+    if (rec && result && [result isKindOfClass:rec]) {
+        gCapturedOriginal = result;
+    }
+    return result;
+}
+// 取出原消息内容（同上用途）→ 备份截获
+- (id)getRecallMessageContent:(id)arg1 bindUin:(unsigned long long)arg2 {
+    id result = %orig;
+    if (!gCapturedOriginal) {
+        Class rec = objc_getClass("OCMsgRecord");
+        if (rec && result && [result isKindOfClass:rec]) {
+            gCapturedOriginal = result;
+        }
+    }
+    return result;
+}
+// 灰条构造出口 → 直接返回缓存的原消息，原内容留在聊天里
 - (id)convertRecallItemToMsg:(id)arg1 recallModel:(id)arg2 msgType:(int)arg3 bindUin:(unsigned long long)arg4 {
     if (gEnableMessageRecall) {
         Class rec = objc_getClass("OCMsgRecord");
-        if (rec && [arg1 isKindOfClass:rec]) {
+        if (rec && gCapturedOriginal && [gCapturedOriginal isKindOfClass:rec]) {
+            id orig = gCapturedOriginal;
+            gCapturedOriginal = nil;
             showBlockToast(@"已拦截一次消息撤回");
-            return arg1; // 直接返回原消息，原内容保留在聊天里
+            return orig; // 原消息，原内容保留在聊天里
         }
     }
+    gCapturedOriginal = nil;
     return %orig;
 }
 - (id)handleSideAccountRecallNotify:(id)arg1 bufferLen:(int)arg2 subcmd:(int)arg3
@@ -221,7 +248,7 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
 }
 %end
 
-// 备份防御：即使上面的转换出口未命中，也尽量保住原消息（部分路径会写 recallTime）
+// 备份防御：部分路径直接写 recallTime
 %hook OCMsgRecord
 - (void)setRecallTime:(long long)arg1 {
     if (gEnableMessageRecall && arg1 > 0) return; // 丢弃撤回标记
@@ -233,10 +260,10 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
 }
 %end
 
-// 撤回事件入口（NT kernel 主链路，首参 int 匹配头文件）——纵深防御
+// NT kernel 主链路，首参 int 匹配头文件 ——纵深防御
 %hook KTIKernelMsgListener
 - (void)onMsgRecall:(int)arg1 peerUid:(id)arg2 seq:(unsigned long long)arg3 {
-    if (gEnableMessageRecall) return; // 不调用 %orig -> Kotlin 侧撤回横幅被跳过
+    if (gEnableMessageRecall) return; // Kotlin 侧撤回横幅被跳过
     %orig;
 }
 %end
