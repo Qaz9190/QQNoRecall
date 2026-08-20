@@ -1,0 +1,25 @@
+name: Build QQNoRecall
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build .deb (rootless, Dopamine/palera1n)
+        uses: Randomblock1/theos-action@v1
+        with:
+          make-args: package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qqnorecall-deb
+          path: packages/*.deb
+          if-no-files-found: error

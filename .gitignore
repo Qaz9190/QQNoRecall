@@ -1,0 +1,11 @@
+# 构建产物
+packages/
+.obj/
+.make/
+*.deb
+
+# 本地分析用（非插件内容）
+qq-headers/
+
+# 系统
+.DS_Store
