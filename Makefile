@@ -1,6 +1,6 @@
 ARCHS = arm64 arm64e
-# 不锁定具体 SDK 版本，交给 theos-action 安装的 SDK 自动匹配（当前为 iPhoneOS16.5.sdk）
-# 部署目标 15.0：rootless 越狱要求，且覆盖 safeAreaInsets(iOS11)/UIWindowScene(iOS13)
+# SDK 版本留空 = 自动匹配 theos-action 安装的 SDK（当前为 iPhoneOS16.5.sdk，勿写死 15.0，CI 上不存在会直接报错）
+# 部署目标 15.0：rootless 越狱要求，且满足 safeAreaInsets(iOS11)/UIWindowScene(iOS13)
 TARGET = iphone:clang::15.0
 
 include $(THEOS)/makefiles/common.mk

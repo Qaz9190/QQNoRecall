@@ -1,18 +1,23 @@
 //  QQNoRecall — QQ 消息防撤回 / 闪图防撤回
-//  Target: QQ (com.tencent.mqq) 9.3.35 (NT kernel)
+//  Target: QQ (com.tencent.mqq) 9.3.35（NT kernel）
 //  Framework: Theos + Logos (Objective-C, ARC)
 //
-//  Hook 设计依据（来自 QQ9.3.35 头文件 class-dump）：
-//  * 消息撤回：NT kernel 通过监听者回调 -[KTIKernelMsgListener onMsgRecall:peerUid:seq:]
-//    通知上层把消息替换成“撤回”灰条。拦截该回调即可让消息保持原样。
-//    旧链路（关联账号/老协议）由 QQMessageRecallModule / QQMessageRecallPackageHandler /
-//    QQMessageRecallNetEngine 处理，同样拦截作为纵深防御。
-//  * 闪图防撤回：闪图(阅后即焚)在被查看后由 NTAIOChat.NTAIOChatFlashPicContentView
-//    收到销毁通知( -notificationActionWithSender: )后替换为“已焚毁”占位。
-//    拦截该通知即可让闪图保持可见；同时闪图被发送者撤回也走 onMsgRecall，一并覆盖。
+//  Hook 依据（QQ 9.3.35 版本头文件 class-dump，Hook 点见 README 对照表）：
+//  * 消息撤回主链路：-[KTIKernelMsgListener onMsgRecall:peerUid:seq:]
+//    NT kernel 撤回回调，拦截后消息保持原样、不生成“撤回”灰条。
+//  * 旧协议 / 关联账号链路：QQMessageRecallModule / QQMessageRecallPackageHandler /
+//    QQMessageRecallNetEngine（纵深防御，一并拦截）。
+//  * 闪图销毁：NTAIOChat.NTAIOChatFlashPicContentView -notificationActionWithSender:
+//    闪图被查看后收到销毁通知并替换为“已焚毁”占位；拦截以保留原图。
+//    该类是 Swift 桥接类（类名含点），Logos %hook 会触发告警且无法捕获全部调用，
+//    故用 MSHookMessageEx 在运行时替换（见文件底部 constructor）。
 //
-//  偏好读取：直接用 CFPreferences 读取 com.qaz9190.qqnorecall 域，
-//  无需依赖 Cephei，兼容 rootless / roothide。
+//  CI 环境结论（GitHub Actions + Randomblock1/theos-action@v1 实测）：
+//  1. theos-action 只安装 Theos + iPhoneOS16.5.sdk 并导出 $THEOS，不会执行 make；
+//  2. Theos 开启 -Werror：deprecated API（如 UIApplication.keyWindow）直接报错，
+//     本文件改用 UIWindowScene.windows 遍历，完全避开废弃 API；
+//  3. Makefile 部署目标为 iOS 15.0（rootless 越狱要求），safeAreaInsets(11.0)/
+//     UIWindowScene(13.0) 均可用，无需 @available 守卫。
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -20,23 +25,23 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 
-// ---- 偏好开关（默认全部开启，提前声明以便下方闪图 hook 存根引用）----
+#define PREF_DOMAIN CFSTR("com.qaz9190.qqnorecall")
+#define PREFS_CHANGED_NOTIFICATION CFSTR("com.qaz9190.qqnorecall/prefsChanged")
+
+// ---- 偏好开关（默认全部开启）----
 static BOOL gEnableMessageRecall = YES; // 消息防撤回
 static BOOL gEnableFlashPic = YES;      // 闪图防撤回
 static BOOL gShowToast = NO;            // 拦截时顶部提示
 
-// 闪图“销毁”通知的原生实现存根（用 MSHookMessageEx 运行时替换，
-// 以绕过 Logos 对 Swift 桥接类 hook 的告警/不可靠行为）
+// ---- 闪图销毁通知 hook 存根（由文件底部 constructor 用 MSHookMessageEx 安装）----
 static void (*origFlashPicNotificationAction)(id, SEL, id) = NULL;
 static void hookedFlashPicNotificationAction(id self, SEL _cmd, id sender) {
     if (gEnableFlashPic) return; // 拦截销毁通知，保留原图
     if (origFlashPicNotificationAction) origFlashPicNotificationAction(self, _cmd, sender);
 }
 
-#define PREF_DOMAIN CFSTR("com.qaz9190.qqnorecall")
-#define PREFS_CHANGED_NOTIFICATION CFSTR("com.qaz9190.qqnorecall/prefsChanged")
-
-static void loadPrefs() {
+// ---- 偏好读取：CFPreferences 直读，不依赖 Cephei，兼容 rootless / roothide ----
+static void loadPrefs(void) {
     CFPropertyListRef v;
     v = CFPreferencesCopyAppValue(CFSTR("kEnableMessageRecall"), PREF_DOMAIN);
     if (v) { gEnableMessageRecall = [(__bridge id)v boolValue]; CFRelease(v); }
@@ -47,21 +52,21 @@ static void loadPrefs() {
     CFPreferencesAppSynchronize(PREF_DOMAIN);
 }
 
-static void showBlockToast(NSString *text) {
-    if (!gShowToast || !text.length) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = nil;
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]] &&
-                    ((UIWindowScene *)scene).activationState == UISceneActivationStateForegroundActive) {
-                    win = ((UIWindowScene *)scene).windows.firstObject;
-                    break;
-                }
-            }
-        } else {
-            win = UIApplication.sharedApplication.keyWindow;
+// 用 UIWindowScene.windows 取可见窗口（不用废弃的 UIApplication.keyWindow）
+static UIWindow *qqnorecall_visibleWindow(void) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (!w.isHidden) return w;
         }
+    }
+    return nil;
+}
+
+static void showBlockToast(NSString *text) {
+    if (!gShowToast || text.length == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *win = qqnorecall_visibleWindow();
         if (!win) return;
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text = text;
@@ -132,8 +137,9 @@ static void showBlockToast(NSString *text) {
 
 // =====================================================================
 //  闪图防撤回：拦截闪图“已焚毁”销毁通知
-//  该视图为 Swift 桥接类（NTAIOChat.NTAIOChatFlashPicContentView），
-//  Logos %hook 会触发告警且“无法捕获全部调用”，故改用 MSHookMessageEx。
+//  NTAIOChat.NTAIOChatFlashPicContentView 为 Swift 桥接类，
+//  Logos %hook 会触发告警(-Werror)且“无法捕获全部调用”，故用 MSHookMessageEx。
+//  发送者主动撤回闪图走 onMsgRecall，已被上面的主链路覆盖。
 // =====================================================================
 __attribute__((constructor)) static void qqnorecall_init_flashpic(void) {
     Class cls = objc_getClass("NTAIOChat.NTAIOChatFlashPicContentView");

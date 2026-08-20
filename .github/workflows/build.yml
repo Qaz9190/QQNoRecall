@@ -12,13 +12,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # theos-action 仅安装 Theos + iOS SDK 并导出 $THEOS，不会自动编译
+      # theos-action 仅安装 Theos + iOS SDK（当前 iPhoneOS16.5.sdk）并导出 $THEOS，
+      # 不会执行 make —— 必须有独立的 make 步骤。有效输入仅：
+      # theos-dir / theos-src / theos-sdks / theos-sdks-branch / orion
       - name: Install Theos
         uses: Randomblock1/theos-action@v1
 
       - name: Build .deb (rootless, Dopamine/palera1n)
         run: |
-          set -o pipefail
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless > build.log 2>&1 || {
             echo "===== BUILD FAILED — build.log ====="
             cat build.log

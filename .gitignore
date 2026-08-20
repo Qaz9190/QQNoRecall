@@ -1,11 +1,9 @@
 # 构建产物
 packages/
+.theos/
 .obj/
-.make/
 *.deb
-
-# 本地分析用（非插件内容）
-qq-headers/
+build.log
 
 # 系统
 .DS_Store
