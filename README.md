@@ -61,3 +61,11 @@ make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
   若某 QQ 小版本改了销毁逻辑，可在 `Tweak.xm` 补 `QQFlashPicturePlayer` /
   `AIOPhotoBrowser.NTAIOFlashPicturePhotoBrowserViewController -finishFlashImgPreview` 等备选类。
 - 仅影响本机显示（本地拦截），对方仍会收到正常撤回。
+
+## 防撤回失效自查
+
+如果装对 deb 后仍无法拦截：
+
+1. **确认 deb 格式与越狱匹配**：Dopamine/palera1n（iOS15+）用 rootless；roothide（A12+ arm64e）用 roothide。装错格式插件不加载（表现为设置里无「防撤回」且无拦截提示）。
+2. **看顶部提示**：对方撤回后屏幕顶部若弹出「已拦截一次消息撤回」，说明 hook 已命中、功能生效；若没提示且撤回照常，多半是格式装错或 deb 未生效（重装后杀 QQ 重进）。
+3. **核心机制**：防撤回通过拦截 `OCMsgRecord.recallTime` 的写入实现——只要该字段保持 0，原消息永远正常显示、不会变灰条。这比只拦截 `onMsgRecall` 事件更彻底（覆盖内核经 `onMsgInfoListUpdate` 刷新列表的路径）。

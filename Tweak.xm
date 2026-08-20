@@ -3,14 +3,26 @@
 //  Framework: Theos + Logos (Objective-C, ARC)
 //
 //  Hook 依据（QQ 9.3.35 版本头文件 class-dump）：
-//  * 消息撤回主链路：-[KTIKernelMsgListener onMsgRecall:peerUid:seq:]
-//    ⚠️ 该类由 Kotlin Multiplatform Mobile 桥接生成，Kotlin Int 编译为 OC 的
-//    NSInteger(64bit)，故第一个参数必须写成 long long，否则类型编码不匹配、
-//    Logos hook 无法挂上（这正是早期“防撤回失效”的根因）。拦截后 Kotlin 侧
-//    撤回逻辑被跳过，消息保持原样、不生成“撤回”灰条。
-//  * 旧协议 / 关联账号链路（纵深防御）：QQMessageRecallModule /
+//
+//  ★ 撤回生效的真正开关：消息模型 OCMsgRecord 的 recallTime 字段(long long)
+//    —— 对方撤回时，内核把该消息的 recallTime 设为非 0，AIO 列表读到
+//       recallTime>0 就把“原消息”替换成灰色提示。所以防撤回的核心是
+//       **阻止 recallTime 被写成非 0**（无论经哪个代码路径触发），原消息
+//       因此始终保持 recallTime==0，正常显示、不生成灰条。
+//    → 拦截两个写入点：
+//        -[OCMsgRecord setRecallTime:]                  (long long)
+//        -[OCMsgRecord setKt_recallTimeFromCodec:]      (id，codec 解码写入)
+//
+//  ★ 撤回事件入口（NT kernel 主链路）：
+//    -[KTIKernelMsgListener onMsgRecall:(int)peerUid:(id)seq:(unsigned long long)]
+//    ⚠️ 头文件签名首参为 int（KMM 桥接：Kotlin Int → OC int，32bit），
+//       之前误写成 long long 导致类型编码不匹配、hook 挂不上（防撤回失效根因之一）。
+//       拦截后 Kotlin 侧不再触发灰条横幅。
+//
+//  ★ 旧协议 / 关联账号链路（纵深防御）：QQMessageRecallModule /
 //    QQMessageRecallPackageHandler / QQMessageRecallNetEngine。
-//  * 闪图销毁：NTAIOChat.NTAIOChatFlashPicContentView -notificationActionWithSender:
+//
+//  ★ 闪图销毁：NTAIOChat.NTAIOChatFlashPicContentView -notificationActionWithSender:
 //    Swift 桥接类（类名含点），用 MSHookMessageEx 运行时替换。
 //
 //  QQ 内设置页：hook QQNewSettingsViewController（QQ「设置」主 VC），在导航栏
@@ -23,7 +35,9 @@
 //  2. Theos 开启 -Werror：deprecated API（如 UIApplication.keyWindow）直接报错，
 //     本文件改用 UIWindowScene.windows 遍历，完全避开废弃 API；
 //  3. Makefile 部署目标为 iOS 15.0（rootless/roothide 越狱要求），safeAreaInsets(11.0)/
-//     UIWindowScene(13.0) 均可用，无需 @available 守卫。
+//     UIWindowScene(13.0) 均可用，无需 @available 守卫；
+//  4. Logos %hook Swift 桥接类（类名含点）会告警(-Werror)且“无法捕获全部调用”，
+//     故闪图 hook 用 MSHookMessageEx 而非 %hook。
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -153,7 +167,7 @@ static NSString *const kQQNoRecallTitles[] = {@"消息防撤回", @"闪图防撤
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(sw.on), PREF_DOMAIN);
     CFPreferencesAppSynchronize(PREF_DOMAIN);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                          PREFS_CHANGED_NOTIFICATION, NULL, NULL, YES);
+                                         PREFS_CHANGED_NOTIFICATION, NULL, NULL, YES);
 }
 @end
 
@@ -184,13 +198,34 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
 }
 
 // =====================================================================
-//  消息防撤回（NT kernel 主链路，KMM 桥接：第一个参数为 long long）
+//  消息防撤回 —— 核心：阻止 OCMsgRecord.recallTime 被写为非 0
+//  （只要 recallTime 保持 0，原消息永远正常显示、不生成灰条）
+// =====================================================================
+%hook OCMsgRecord
+- (void)setRecallTime:(long long)arg1 {
+    if (gEnableMessageRecall && arg1 > 0) {
+        showBlockToast(@"已拦截一次消息撤回");
+        return; // 丢弃撤回标记，消息保持原样
+    }
+    %orig;
+}
+- (void)setKt_recallTimeFromCodec:(id)arg1 {
+    if (gEnableMessageRecall && [arg1 longLongValue] > 0) {
+        showBlockToast(@"已拦截一次消息撤回");
+        return; // codec 解码写入路径同样拦截
+    }
+    %orig;
+}
+%end
+
+// =====================================================================
+//  消息防撤回 —— 撤回事件入口（NT kernel 主链路，首参 int 匹配头文件）
+//  拦截后 Kotlin 侧不再弹出“X 撤回了一条消息”横幅。
 // =====================================================================
 %hook KTIKernelMsgListener
-- (void)onMsgRecall:(long long)arg1 peerUid:(id)arg2 seq:(unsigned long long)arg3 {
+- (void)onMsgRecall:(int)arg1 peerUid:(id)arg2 seq:(unsigned long long)arg3 {
     if (gEnableMessageRecall) {
-        showBlockToast(@"已拦截一次消息撤回");
-        return; // 不调用 %orig -> Kotlin 侧撤回逻辑被跳过，消息保持原样
+        return; // 不调用 %orig -> Kotlin 侧撤回逻辑被跳过
     }
     %orig;
 }
