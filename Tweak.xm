@@ -71,10 +71,13 @@ static void loadPrefs(void) {
     v = CFPreferencesCopyAppValue(CFSTR("kSelectiveMode"), PREF_DOMAIN);
     if (v) { gSelectiveMode = [(__bridge id)v boolValue]; CFRelease(v); }
     v = CFPreferencesCopyAppValue(CFSTR("kEnabledPeers"), PREF_DOMAIN);
-    if (v && [v isKindOfClass:[NSArray class]]) {
-        [gEnabledPeers removeAllObjects];
-        for (id p in (__bridge NSArray *)v) {
-            if ([p isKindOfClass:[NSString class]]) [gEnabledPeers addObject:p];
+    if (v) {
+        id bridged = (__bridge id)v;
+        if ([bridged isKindOfClass:[NSArray class]]) {
+            [gEnabledPeers removeAllObjects];
+            for (id p in (NSArray *)bridged) {
+                if ([p isKindOfClass:[NSString class]]) [gEnabledPeers addObject:p];
+            }
         }
         CFRelease(v);
     }
@@ -155,6 +158,19 @@ static void dbClose(void) {
 }
 
 // 从 elements 中尽力抽取文本/图片路径
+static NSString *qqnorecall_firstString(id el, SEL s1, SEL s2, SEL s3, SEL s4) {
+    SEL sels[] = {s1, s2, s3, s4};
+    for (int i = 0; i < 4; i++) {
+        SEL sel = sels[i];
+        if (sel && [el respondsToSelector:sel]) {
+            id (*msgSendFn)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+            id v = msgSendFn(el, sel);
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) return v;
+        }
+    }
+    return nil;
+}
+
 static void extractContentFromElements(NSArray *elements, NSString **outText, NSString **outImagePath) {
     *outText = nil;
     *outImagePath = nil;
@@ -162,39 +178,20 @@ static void extractContentFromElements(NSArray *elements, NSString **outText, NS
     NSMutableString *textBuf = [NSMutableString new];
     for (id el in elements) {
         if (!el || ![el isKindOfClass:[NSObject class]]) continue;
-        // 文本元素：尝试常见 selector
         if (!*outText) {
-            for (SEL sel in @[@selector(textContent), @selector(content), @selector(text), @selector(msgText)]) {
-                if ([el respondsToSelector:sel]) {
-                    id v = [el performSelector:sel];
-                    if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
-                        *outText = v;
-                        break;
-                    }
-                }
-            }
+            *outText = qqnorecall_firstString(el,
+                @selector(textContent), @selector(content), @selector(text), @selector(msgText));
         }
-        // 图片元素：尝试常见 selector
         if (!*outImagePath) {
-            for (SEL sel in @selector(localPath), @selector(imagePath), @selector(filePath), @selector(path)]) {
-                if ([el respondsToSelector:sel]) {
-                    id v = [el performSelector:sel];
-                    if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
-                        *outImagePath = v;
-                        break;
-                    }
-                }
-            }
+            *outImagePath = qqnorecall_firstString(el,
+                @selector(localPath), @selector(imagePath), @selector(filePath), @selector(path));
         }
-        // 收集文本
-        for (SEL sel in @selector(textContent), @selector(content), @selector(text), @selector(msgText)) {
-            if ([el respondsToSelector:sel]) {
-                id v = [el performSelector:sel];
-                if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
-                    [textBuf appendString:v];
-                    [textBuf appendString:@"\n"];
-                }
-            }
+        NSString *t = qqnorecall_firstString(el,
+            @selector(textContent), @selector(content), @selector(text), @selector(msgText));
+        if (t) {
+            [textBuf appendString:t];
+            [textBuf appendString:@"
+"];
         }
     }
     if (!*outText && textBuf.length > 0) *outText = [textBuf copy];
@@ -689,7 +686,6 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
 }
 
 // 消息防撤回
-static BOOL gIsInRecall = NO;
 %hook KTIKernelMsgListener
 - (void)onMsgRecall:(int)arg1 peerUid:(id)arg2 seq:(unsigned long long)arg3 {
     if (gEnableMessageRecall) {
