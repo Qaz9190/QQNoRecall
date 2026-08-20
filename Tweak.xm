@@ -55,6 +55,13 @@ static sqlite3 *gDB = NULL;
 static NSString *gDBPath = nil;
 static NSString *gImageDir = nil;
 
+// 前向声明：OCMsgRecord 是 forward-decl 类型，添加 category 让编译器认识我们用到的 selector
+@class OCMsgRecord;
+@interface OCMsgRecord (QQNoRecallExt)
+- (NSString *)peerUid;
+- (long long)msgSeq;
+@end
+
 // ---- 闪图销毁通知 hook 存根 ----
 static void (*origFlashPicNotificationAction)(id, SEL, id) = NULL;
 static void hookedFlashPicNotificationAction(id self, SEL _cmd, id sender);
