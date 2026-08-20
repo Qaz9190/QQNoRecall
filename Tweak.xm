@@ -190,8 +190,7 @@ static void extractContentFromElements(NSArray *elements, NSString **outText, NS
             @selector(textContent), @selector(content), @selector(text), @selector(msgText));
         if (t) {
             [textBuf appendString:t];
-            [textBuf appendString:@"
-"];
+            [textBuf appendString:@"\n"];
         }
     }
     if (!*outText && textBuf.length > 0) *outText = [textBuf copy];
@@ -732,8 +731,11 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     if (!arg1) return;
     NSString *peerUid = nil;
     long long msgSeq = 0;
-    if ([self respondsToSelector:@selector(peerUid)]) peerUid = [self peerUid];
-    if ([self respondsToSelector:@selector(msgSeq)]) msgSeq = [self msgSeq];
+    // OCMsgRecord 是 forward-decl 类型；用 id 转换让编译器不做静态方法检查
+    @try {
+        peerUid = [(id)self peerUid];
+        msgSeq = [(id)self msgSeq];
+    } @catch (id e) { return; }
     if (!peerUid || !msgSeq) return;
     NSString *key = [NSString stringWithFormat:@"%@_%lld", peerUid, msgSeq];
     @synchronized (gElementsCache) {
