@@ -18,6 +18,18 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
+#import <substrate.h>
+
+// Logos 对 hook Swift 桥接类会报 warning 并开启 -Werror，这里忽略该警告
+#pragma clang diagnostic ignored "-Wlogos-swift-bridged"
+
+// 闪图“销毁”通知的原生实现存根（用 MSHookMessageEx 运行时替换，
+// 以绕过 Logos 对 Swift 桥接类 hook 的告警/不可靠行为）
+static void (*origFlashPicNotificationAction)(id, SEL, id) = NULL;
+static void hookedFlashPicNotificationAction(id self, SEL _cmd, id sender) {
+    if (gEnableFlashPic) return; // 拦截销毁通知，保留原图
+    if (origFlashPicNotificationAction) origFlashPicNotificationAction(self, _cmd, sender);
+}
 
 #define PREF_DOMAIN CFSTR("com.qaz9190.qqnorecall")
 #define PREFS_CHANGED_NOTIFICATION CFSTR("com.qaz9190.qqnorecall/prefsChanged")
@@ -123,13 +135,15 @@ static void showBlockToast(NSString *text) {
 
 // =====================================================================
 //  闪图防撤回：拦截闪图“已焚毁”销毁通知
+//  该视图为 Swift 桥接类（NTAIOChat.NTAIOChatFlashPicContentView），
+//  Logos %hook 会触发告警且“无法捕获全部调用”，故改用 MSHookMessageEx。
 // =====================================================================
-%hook NTAIOChat.NTAIOChatFlashPicContentView
-- (void)notificationActionWithSender:(id)arg1 {
-    if (gEnableFlashPic) {
-        // 闪图被查看后触发销毁占位；拦截以保留原图
-        return;
+__attribute__((constructor)) static void qqnorecall_init_flashpic(void) {
+    Class cls = objc_getClass("NTAIOChat.NTAIOChatFlashPicContentView");
+    if (cls) {
+        MSHookMessageEx(cls,
+                        @selector(notificationActionWithSender:),
+                        (IMP)hookedFlashPicNotificationAction,
+                        (IMP *)&origFlashPicNotificationAction);
     }
-    %orig;
 }
-%end
