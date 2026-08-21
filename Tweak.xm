@@ -721,6 +721,9 @@ static void qqnorecall_openSettingsImp(id self, SEL _cmd) {
     gElementsCache = [NSMutableDictionary new];
     loadPrefs();
 
+    NSLog(@"[QQNoRecall] %s: constructor executed, prefs loaded: msg=%d flash=%d selective=%d",
+          __func__, (int)gEnableMessageRecall, (int)gEnableFlashPic, (int)gSelectiveMode);
+
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
         NULL,
@@ -759,13 +762,21 @@ static void hooked_onRecvRecallMsg(id self, SEL _cmd, id arg1) {
         if (orig_onRecvRecallMsg) orig_onRecvRecallMsg(self, _cmd, arg1);
         return;
     }
-    if (arg1) {
-        NSString *peer = qqnorecall_extractPeerFromRecallModel(arg1);
-        qqnorecall_backupFromRecallModel(arg1);
-        addEnabledPeer(peer);
-        NSLog(@"[QQNoRecall] blocked onRecvRecallMsg peer=%@", peer);
+    if (!arg1) return;
+    NSString *peer = qqnorecall_extractPeerFromRecallModel(arg1);
+    // 选择性模式：如果开启仅对已添加 peer 生效，则检查集合
+    if (gSelectiveMode) {
+        if (!peer || ![gEnabledPeers containsObject:peer]) {
+            if (orig_onRecvRecallMsg) orig_onRecvRecallMsg(self, _cmd, arg1);
+            return;
+        }
     }
-    return; // 不调原实现 → 原消息保留、灰条不生成
+    // 备份并阻止原实现（不调用原方法）
+    BOOL backed = qqnorecall_backupFromRecallModel(arg1);
+    addEnabledPeer(peer); // 保留"首次撤回自动加入"的语义
+    NSLog(@"[QQNoRecall] blocked onRecvRecallMsg peer=%@ backed=%d selective=%d",
+          peer, (int)backed, (int)gSelectiveMode);
+    return;
 }
 
 // 2) NTAIOMenuRecallService 三个 class methods（撤回完成回调）
@@ -795,22 +806,73 @@ static void hooked_reloadAppearanceWithRecord(id self, SEL _cmd, id record) {
     if (orig_reloadAppearanceWithRecord) orig_reloadAppearanceWithRecord(self, _cmd, record);
 }
 
+// 延迟安装 Swift hooks：Swift 类注册到 runtime 可能比 constructor 晚，
+// 直接 objc_getClass 会返回 NULL 导致 hook 静默失败。
+// 后台轮询等待类出现（最多 8 秒），然后在主线程安装。
 __attribute__((constructor)) static void qqnorecall_install_swifthooks(void) {
-    MSHookMessageEx(objc_getClass("NTAIOChat.NTAIOFloatEarManager"),
-                    @selector(onRecvRecallMsg:),
-                    (IMP)hooked_onRecvRecallMsg, (IMP *)&orig_onRecvRecallMsg);
-    MSHookMessageEx(objc_getClass("NTAIOChat.NTAIOMenuRecallService"),
-                    @selector(recallCompleteWithCell:observer:code:msg:),
-                    (IMP)hooked_recallCompleteWithCell, (IMP *)&orig_recallCompleteWithCell);
-    MSHookMessageEx(objc_getClass("NTAIOChat.NTAIOMenuRecallService"),
-                    @selector(recallCompleteWithCellViewModel:observer:code:msg:),
-                    (IMP)hooked_recallCompleteWithCellViewModel, (IMP *)&orig_recallCompleteWithCellViewModel);
-    MSHookMessageEx(objc_getClass("NTAIOChat.NTAIOMenuRecallService"),
-                    @selector(recallGrayTipsMsgWithCellView:observer:),
-                    (IMP)hooked_recallGrayTipsMsgWithCellView, (IMP *)&orig_recallGrayTipsMsgWithCellView);
-    MSHookMessageEx(objc_getClass("NTAIOChat.NTAIOMessageCellViewModel"),
-                    @selector(reloadAppearanceWithRecord:),
-                    (IMP)hooked_reloadAppearanceWithRecord, (IMP *)&orig_reloadAppearanceWithRecord);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        const char *targets[] = {
+            "NTAIOChat.NTAIOFloatEarManager",
+            "NTAIOChat.NTAIOMenuRecallService",
+            "NTAIOChat.NTAIOMessageCellViewModel",
+            "NTAIOChat.NTAIOChatFlashPicContentView",
+            NULL
+        };
+        BOOL ready = NO;
+        for (int attempt = 0; attempt < 16; attempt++) {
+            ready = YES;
+            for (int i = 0; targets[i] != NULL; i++) {
+                if (!objc_getClass(targets[i])) { ready = NO; break; }
+            }
+            if (ready) break;
+            usleep(500 * 1000); // 0.5s
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSLog(@"[QQNoRecall] attempting swift hooks install (classes ready=%d)", (int)ready);
+            Class cls;
+            cls = objc_getClass("NTAIOChat.NTAIOFloatEarManager");
+            if (cls) {
+                MSHookMessageEx(cls, @selector(onRecvRecallMsg:),
+                                (IMP)hooked_onRecvRecallMsg, (IMP *)&orig_onRecvRecallMsg);
+                NSLog(@"[QQNoRecall] hook NTAIOFloatEarManager -> orig=%p", orig_onRecvRecallMsg);
+            } else {
+                NSLog(@"[QQNoRecall] CLASS NOT FOUND: NTAIOChat.NTAIOFloatEarManager");
+            }
+
+            cls = objc_getClass("NTAIOChat.NTAIOMenuRecallService");
+            if (cls) {
+                MSHookMessageEx(cls, @selector(recallCompleteWithCell:observer:code:msg:),
+                                (IMP)hooked_recallCompleteWithCell, (IMP *)&orig_recallCompleteWithCell);
+                MSHookMessageEx(cls, @selector(recallCompleteWithCellViewModel:observer:code:msg:),
+                                (IMP)hooked_recallCompleteWithCellViewModel, (IMP *)&orig_recallCompleteWithCellViewModel);
+                MSHookMessageEx(cls, @selector(recallGrayTipsMsgWithCellView:observer:),
+                                (IMP)hooked_recallGrayTipsMsgWithCellView, (IMP *)&orig_recallGrayTipsMsgWithCellView);
+                NSLog(@"[QQNoRecall] hook NTAIOMenuRecallService -> origs: %p %p %p",
+                      orig_recallCompleteWithCell, orig_recallCompleteWithCellViewModel,
+                      orig_recallGrayTipsMsgWithCellView);
+            } else {
+                NSLog(@"[QQNoRecall] CLASS NOT FOUND: NTAIOChat.NTAIOMenuRecallService");
+            }
+
+            cls = objc_getClass("NTAIOChat.NTAIOMessageCellViewModel");
+            if (cls) {
+                MSHookMessageEx(cls, @selector(reloadAppearanceWithRecord:),
+                                (IMP)hooked_reloadAppearanceWithRecord, (IMP *)&orig_reloadAppearanceWithRecord);
+                NSLog(@"[QQNoRecall] hook NTAIOMessageCellViewModel -> orig=%p", orig_reloadAppearanceWithRecord);
+            } else {
+                NSLog(@"[QQNoRecall] CLASS NOT FOUND: NTAIOChat.NTAIOMessageCellViewModel");
+            }
+
+            cls = objc_getClass("NTAIOChat.NTAIOChatFlashPicContentView");
+            if (cls) {
+                MSHookMessageEx(cls, @selector(notificationActionWithSender:),
+                                (IMP)hookedFlashPicNotificationAction, (IMP *)&origFlashPicNotificationAction);
+                NSLog(@"[QQNoRecall] hook NTAIOChatFlashPicContentView -> orig=%p", origFlashPicNotificationAction);
+            } else {
+                NSLog(@"[QQNoRecall] CLASS NOT FOUND: NTAIOChat.NTAIOChatFlashPicContentView");
+            }
+        });
+    });
 }
 
 // 备份防御：OCMsgRecord -recallTime getter 永远返回 0 -> cellVM 看到的就是未撤回
@@ -875,16 +937,7 @@ __attribute__((constructor)) static void qqnorecall_install_swifthooks(void) {
 }
 %end
 
-// 闪图防撤回 + 备份
-__attribute__((constructor)) static void qqnorecall_init_flashpic(void) {
-    Class cls = objc_getClass("NTAIOChat.NTAIOChatFlashPicContentView");
-    if (cls) {
-        MSHookMessageEx(cls, @selector(notificationActionWithSender:),
-                        (IMP)hookedFlashPicNotificationAction,
-                        (IMP *)&origFlashPicNotificationAction);
-    }
-}
-
+// 闪图防撤回 + 备份（hook 安装已整合到上面的延迟 constructor）
 static void hookedFlashPicNotificationAction(id self, SEL _cmd, id sender) {
     if (gEnableFlashPic) {
         // 备份闪图（在销毁前抓图）
