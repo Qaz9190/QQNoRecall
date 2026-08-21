@@ -115,12 +115,6 @@ static BOOL isPeerEnabled(NSString *peerUid) {
     return [gEnabledPeers containsObject:peerUid];
 }
 
-// 撤回模型 (NTAIOChat.RecallNotiAIOModel 或 RecallNotiAIOModel) 同样判断:
-static BOOL isPeerEnabledForRecall(id recallModel) {
-    NSString *peer = qqnorecall_extractPeerFromRecallModel(recallModel);
-    return isPeerEnabled(peer);
-}
-
 // 从 RecallNotiAIOModel(可能为 NTAIOChat.RecallNotiAIOModel 或 RecallNotiAIOModel) 提取 peer/aioUin
 static NSString *qqnorecall_extractPeerFromRecallModel(id model) {
     if (!model) return nil;
