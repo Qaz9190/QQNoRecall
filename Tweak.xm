@@ -108,13 +108,6 @@ static void loadPrefs(void) {
     }
     CFPreferencesAppSynchronize(PREF_DOMAIN);
 }
-
-static BOOL isPeerEnabled(NSString *peerUid) {
-    if (!gSelectiveMode) return YES; // 全部生效模式
-    if (!peerUid) return NO;
-    return [gEnabledPeers containsObject:peerUid];
-}
-
 // 从 RecallNotiAIOModel(可能为 NTAIOChat.RecallNotiAIOModel 或 RecallNotiAIOModel) 提取 peer/aioUin
 static NSString *qqnorecall_extractPeerFromRecallModel(id model) {
     if (!model) return nil;
